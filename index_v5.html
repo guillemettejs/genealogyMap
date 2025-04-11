@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Genealogy Map Timeline (Leaflet)</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    body { margin: 0; }
+    #map { height: 100vh; width: 100vw; }
+    #controls {
+
+      position: absolute;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(255, 255, 255, 0.95);
+      padding: 12px 16px;
+      border-radius: 12px;
+      font-family: 'Segoe UI', sans-serif;
+      box-shadow: 0 0 10px rgba(0,0,0,0.2);
+      z-index: 1000;
+    
+      min-width: 420px;
+      max-width: 600px;
+      text-align: center;
+    }
+    #controls button, #controls select, #controls input {
+      margin: 4px 0;
+    }
+  </style>
+</head>
+<body>
+  <div id="controls">
+    <div style="margin-bottom: 8px; display: flex; align-items: center; justify-content: center; gap: 8px;">
+      <button id="back10">⏪</button>
+      <button id="back1">◀</button>
+      <div id="yearDisplayBox" style="min-width: 80px; text-align: center; font-weight: bold; font-size: 16px;">Year: Loading...</div>
+      <button id="forward1">▶</button>
+      <button id="forward10">⏩</button>
+    </div>
+    <div style="position: relative;">
+      <input type="range" id="yearSlider" min="1600" max="2025" value="1600" style="width: 100%; margin: 4px 0;">
+      <div style="display: flex; justify-content: space-between; font-size: 12px; color: #555; padding: 0 4px;">
+        <span>1600</span>
+        <span>1700</span>
+        <span>1800</span>
+        <span>1900</span>
+        <span>2000</span>
+        <span>2025</span>
+      </div>
+    </div>
+    
+    <button id="playPauseBtn">Pause</button>
+    <br>
+    Speed:
+    <select id="speedControl">
+      <option value="100">10x</option>
+      <option value="200">5x</option>
+      <option value="400" selected>2x (default)</option>
+      <option value="800">1x (slow)</option>
+    </select>
+    
+    <button id="precisionToggle">Precision Mode: Off</button>
+  </div>
+  <div style="position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 1000;">
+    <input id="locationSearch" type="text" placeholder="🔍 Search location..." style="width: 300px; padding: 6px; border-radius: 8px; border: 1px solid #ccc; font-size: 14px;">
+  </div>
+  <div id="map"></div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    let map;
+    let currentYear = 1600;
+    const endYear = 2025;
+    let individuals = [];
+    let precomputedPositions = {};
+    let markers = new Map();
+    let isPlaying = true;
+    let tickRate = 400;
+    let intervalId;
+let tickCount = 0;
+let precisionMode = false;
+
+    async function fetchData() {
+      const response = await fetch("data_v4.json");
+      return await response.json();
+    }
+
+    async function loadPrecomputedPositions() {
+      const years = [1850, 1900, 1950, 2000];
+      const sources = ["before_1850", "1851_1900", "1901_1950", "1951_2000"];
+      precomputedPositions = {};
+      for (const name of sources) {
+        const res = await fetch(`baked_positions_${name}.json`);
+        const data = await res.json();
+        Object.assign(precomputedPositions, data);
+      }
+    }
+
+    async function initMap() {
+      individuals = await fetchData();
+      await loadPrecomputedPositions();
+
+      map = L.map('map').setView([50, -30], 3);
+
+      
+
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors'
+      }).addTo(map);
+
+      setupControls();
+      setupYearJumpers();
+      document.getElementById("yearSlider").addEventListener("input", (e) => {
+        clearInterval(intervalId);
+        isPlaying = false;
+        document.getElementById("playPauseBtn").textContent = "Play";
+        currentYear = parseInt(e.target.value);
+        document.getElementById("yearDisplayBox").textContent = `Year: ${currentYear}`;
+        updateMarkers(currentYear, false);
+      });
+      tickRate = 100;
+      startAnimation();
+      document.getElementById("yearDisplayBox").textContent = `Year: ${currentYear}`;
+    }
+
+    function setupControls() {
+      const yearSlider = document.getElementById("yearSlider");
+      const playPauseBtn = document.getElementById("playPauseBtn");
+      const speedControl = document.getElementById("speedControl");
+      
+
+      playPauseBtn.addEventListener("click", () => {
+        isPlaying = !isPlaying;
+        playPauseBtn.textContent = isPlaying ? "Pause" : "Play";
+        if (isPlaying) startAnimation();
+        else clearInterval(intervalId);
+      });
+
+      speedControl.addEventListener("change", () => {
+        tickRate = parseInt(speedControl.value);
+        if (isPlaying) {
+          clearInterval(intervalId);
+          startAnimation();
+        }
+      });
+
+      
+
+      document.getElementById("precisionToggle").addEventListener("click", () => {
+        precisionMode = !precisionMode;
+        document.getElementById("precisionToggle").textContent = `Precision Mode: ${precisionMode ? "On" : "Off"}`;
+      });
+      };
+    
+
+    function startAnimation() {
+      const yearDisplay = document.getElementById("yearDisplayBox");
+      let tickSkip = 1;
+
+      intervalId = setInterval(() => {
+        tickCount++;
+        if (currentYear > endYear) {
+          clearInterval(intervalId);
+          return;
+        }
+
+        yearDisplay.textContent = `Year: ${currentYear}`;
+        yearSlider.value = currentYear;
+
+        const activeCount = individuals.filter(ind => {
+          const birth = ind.birth?.year;
+          const death = ind.death?.year ?? birth + 100;
+          return currentYear >= birth && currentYear <= death + 10;
+        }).length;
+
+        if (activeCount < 100) tickSkip = 1;
+        else if (activeCount < 500) tickSkip = 2;
+        else if (activeCount < 1000) tickSkip = 5;
+        else if (activeCount < 2000) tickSkip = 10;
+        else tickSkip = 15;
+
+        if (tickCount % tickSkip === 0) {
+  currentYear++;
+  yearDisplay.textContent = `Year: ${currentYear}`;
+  yearSlider.value = currentYear;
+}
+
+updateMarkers(currentYear);
+      }, tickRate);
+    }
+
+    function updateMarkers(year) {
+  const visibleIds = new Set();
+  const active = individuals.filter(ind => {
+    const birth = ind.birth?.year;
+    const death = ind.death?.year ?? birth + 30;
+    return year >= birth && year <= death + 10;
+  });
+
+  const activeCount = active.length;
+  let bucketCount = 1;
+  if (activeCount > 3000) bucketCount = 6;
+  else if (activeCount > 2000) bucketCount = 5;
+  else if (activeCount > 1000) bucketCount = 3;
+
+  const tickGroup = tickCount % bucketCount;
+  const subset = precisionMode ? active : active.filter((_, i) => i % bucketCount === tickGroup);
+
+  subset.forEach(ind => {
+        const birth = ind.birth?.year;
+        const death = ind.death?.year ?? birth + 30;
+        if (year < birth || year > death + 10) return;
+
+        const pos = precomputedPositions[ind.id]?.[year];
+        if (!pos) return;
+        const { lat, lng } = pos;
+        visibleIds.add(ind.id);
+
+        if (!markers.has(ind.id)) {
+          const prev = precomputedPositions[ind.id]?.[year - 1];
+          if (prev) {
+            ind._trail = L.polyline([
+              [prev.lat, prev.lng],
+              [lat, lng]
+            ], {
+              color: '#666',
+              weight: 1,
+              opacity: 0.5
+            }).addTo(map);
+          }
+          const age = year - birth;
+          const lifespan = death - birth;
+          const tAge = Math.min(1, Math.max(0, age / lifespan));
+
+          let color = "#ff0000";
+          if (tAge < 0.5) {
+            const g = Math.floor(255 * (tAge * 2));
+            color = `rgb(255, ${g}, 0)`;
+          } else {
+            const b = Math.floor(255 * ((tAge - 0.5) * 2));
+            const r = Math.floor(255 * (1 - (tAge - 0.5) * 2));
+            color = `rgb(${r}, 255, ${b})`;
+          }
+
+          if (year >= death && year < death + 10) {
+            color = "#999999";
+          }
+
+          
+
+          const borderStyle = ind.death?.year ? 'solid' : '4, 4';
+          const marker = L.circleMarker([lat, lng], {
+            radius: 4,
+            fillColor: color,
+            fillOpacity: 1,
+            color: '#222',
+            weight: 1,
+            dashArray: borderStyle
+          }).addTo(map).bindPopup(
+            `<strong>ID:</strong> ${ind.id}<br>
+             <strong>Birth:</strong> ${birth} @ (${ind.birth.lat}, ${ind.birth.lng})<br>
+             <strong>Birth Place:</strong> ${ind.birth.place ?? 'Unknown'}<br>
+             <strong>Death:</strong> ${death} @ (${ind.death?.lat ?? 'N/A'}, ${ind.death?.lng ?? 'N/A'})<br>
+             <strong>Death Place:</strong> ${ind.death?.place ?? 'Unknown'}<br>
+             ${ind.death?.year ? '' : '<em>Death year unknown</em>'}`);
+
+          markers.set(ind.id, marker);
+
+          if (year === birth && activeCount < 1500) {
+            const halo = L.circle([lat, lng], {
+              radius: 10000,
+              color: '#ffaa00',
+              weight: 1,
+              opacity: 0.5,
+              fillColor: '#ffaa00',
+              fillOpacity: 0.2
+            }).addTo(map);
+            setTimeout(() => map.removeLayer(halo), 1000);
+          }
+        } else {
+          const prev = precomputedPositions[ind.id]?.[year - 1];
+          if (prev && ind._trail) {
+            map.removeLayer(ind._trail);
+            delete ind._trail;
+          }
+          if (prev) {
+            ind._trail = L.polyline([
+              [prev.lat, prev.lng],
+              [lat, lng]
+            ], {
+              color: '#666',
+              weight: 1,
+              opacity: 0.5
+            }).addTo(map);
+          }
+
+          const marker = markers.get(ind.id);
+          
+
+          marker.setLatLng([lat, lng]);
+          const age = year - birth;
+          const lifespan = death - birth;
+          const tAge = Math.min(1, Math.max(0, age / lifespan));
+
+          let color = "#ff0000";
+          if (tAge < 0.5) {
+            const g = Math.floor(255 * (tAge * 2));
+            color = `rgb(255, ${g}, 0)`;
+          } else {
+            const b = Math.floor(255 * ((tAge - 0.5) * 2));
+            const r = Math.floor(255 * (1 - (tAge - 0.5) * 2));
+            color = `rgb(${r}, 255, ${b})`;
+          }
+
+          if (year >= death && year < death + 10) {
+            color = "#999999";
+          }
+          marker.setStyle({ fillColor: color, color: '#222', weight: 1 });
+        }
+      });
+
+      for (const [id, marker] of markers) {
+    const ind = individuals.find(p => p.id === id);
+    if (!ind) continue;
+    const birth = ind.birth?.year;
+    const death = ind.death?.year ?? birth + 30;
+    if (year > death + 10 || year < birth) {
+      map.removeLayer(marker);
+      markers.delete(id);
+      if (ind._trail) {
+        map.removeLayer(ind._trail);
+        delete ind._trail;
+      }
+    }
+  }
+}
+
+
+    function setupYearJumpers() {
+      document.getElementById("back1").onclick = () => jumpYear(-1);
+      document.getElementById("forward1").onclick = () => jumpYear(1);
+      document.getElementById("back10").onclick = () => jumpYear(-10);
+      document.getElementById("forward10").onclick = () => jumpYear(10);
+    }
+
+    function jumpYear(delta) {
+      clearInterval(intervalId);
+      isPlaying = false;
+      document.getElementById("playPauseBtn").textContent = "Play";
+      currentYear = Math.max(1600, Math.min(2025, currentYear + delta));
+      document.getElementById("yearSlider").value = currentYear;
+      document.getElementById("yearDisplayBox").textContent = `Year: ${currentYear}`;
+      updateMarkers(currentYear, false);
+    }
+
+    window.onload = () => {
+      const locationInput = document.getElementById("locationSearch");
+      const datalist = document.getElementById("searchOptions");
+      initMap();
+
+      
+      };
+
+      const locationInput = document.getElementById("locationSearch");
+      const datalist = document.getElementById("searchOptions");
+      locationInput.addEventListener("keypress", async (e) => {
+        if (e.key === "Enter") {
+          const query = locationInput.value;
+          if (!query) return;
+          const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=1`, {
+            headers: { 'Accept-Language': 'en' }
+          });
+          const results = await res.json();
+          if (results.length > 0) {
+            const loc = results[0];
+            map.flyTo([parseFloat(loc.lat), parseFloat(loc.lon)], 7);
+          } else {
+            alert("Location not found");
+          }
+        }
+      });
+    ;
+  </script>
+</body>
+</html>
